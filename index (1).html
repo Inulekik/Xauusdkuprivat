@@ -1,0 +1,155 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>XAUUSD Order Block (Private)</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+body{font-family:Arial;margin:12px;background:#f7f7f7;color:#222}
+#controls{margin-bottom:10px;display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+input[type="number"]{padding:6px}
+button{padding:8px 12px}
+#chart{width:100%;height:420px;background:#fff;border:1px solid #ccc}
+#log{margin-top:10px;background:#fff;padding:8px;border:1px solid #ccc;max-height:280px;overflow:auto}
+.ob-item{padding:6px;border-bottom:1px dashed #eee}
+.buy{color:green;font-weight:600}
+.sell{color:red;font-weight:600}
+small{color:#666}
+</style>
+<script src="https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
+</head>
+<body>
+<h3>XAUUSD — Order Block Finder (Private)</h3>
+
+<div id="controls">
+<label>Interval:
+  <select id="interval">
+    <option value="1min">1min</option>
+    <option value="5min" selected>5min</option>
+    <option value="15min">15min</option>
+    <option value="1h">1h</option>
+  </select>
+</label>
+<label>Threshold <small>(default 1.2)</small>:
+  <input id="threshold" type="number" step="0.1" value="1.2" style="width:60px">
+</label>
+<label>Polling (detik):
+  <input id="poll" type="number" step="1" value="5" style="width:60px">
+</label>
+<label><input id="backtest" type="checkbox"> Backtest 500 bar</label>
+<button id="startBtn">Start</button>
+<button id="stopBtn" disabled>Stop</button>
+</div>
+
+<div id="chart"></div>
+<div id="log"><strong>Signals</strong><div id="oblist"></div></div>
+
+<script>
+(function(){
+const API_KEY = "6b44a2b1073745e1ae5e242d3afdc99b"; // <<== API KEY ANDA
+let timer=null, chart=null, series=null, priceLines=[];
+const interval=document.getElementById('interval');
+const threshold=document.getElementById('threshold');
+const poll=document.getElementById('poll');
+const backtest=document.getElementById('backtest');
+const oblist=document.getElementById('oblist');
+const startBtn=document.getElementById('startBtn');
+const stopBtn=document.getElementById('stopBtn');
+
+function makeChart(){
+  if(chart) return;
+  const c=document.getElementById('chart');
+  chart=LightweightCharts.createChart(c,{width:c.clientWidth,height:c.clientHeight,
+    layout:{backgroundColor:'#fff',textColor:'#333'},
+    rightPriceScale:{scaleMargins:{top:0.1,bottom:0.1}},
+    timeScale:{timeVisible:true}});
+  series=chart.addCandlestickSeries();
+  window.addEventListener('resize',()=>chart.applyOptions({width:c.clientWidth}));
+}
+
+function tdToCandles(arr){return arr.slice().reverse().map(d=>({
+  time:d.datetime, open:+d.open, high:+d.high, low:+d.low, close:+d.close
+}))}
+
+function detectOB(candles,thr){
+  const obs=[];
+  for(let i=1;i<candles.length;i++){
+    const p=candles[i-1], c=candles[i];
+    const pb=Math.abs(p.close-p.open), cb=Math.abs(c.close-c.open);
+    if(p.close<p.open && c.close>c.open && cb>pb*thr)
+      obs.push({type:'buy',top:p.high,bottom:p.low,time:p.time});
+    if(p.close>p.open && c.close<c.open && cb>pb*thr)
+      obs.push({type:'sell',top:p.high,bottom:p.low,time:p.time});
+  }
+  return obs;
+}
+
+function clearLines(){priceLines.forEach(l=>{try{l.remove()}catch(e){}});priceLines=[];}
+
+function drawOB(obs){
+  clearLines(); oblist.innerHTML='';
+  obs.forEach(o=>{
+    const color=o.type==='buy'?'#1b8f3b':'#c23a3a';
+    priceLines.push(series.createPriceLine({price:o.top,color,lineWidth:1,lineStyle:2,title:o.type.toUpperCase()+' TOP'}));
+    priceLines.push(series.createPriceLine({price:o.bottom,color,lineWidth:1,lineStyle:2,title:o.type.toUpperCase()+' BOTTOM'}));
+    const div=document.createElement('div');
+    div.className='ob-item';
+    div.innerHTML=`<span class="${o.type}">${o.type.toUpperCase()}</span> top:${o.top.toFixed(2)} bottom:${o.bottom.toFixed(2)}<br><small>${o.time}</small>`;
+    oblist.prepend(div);
+  });
+}
+
+async function fetchData(intv,limit){
+  const sym=encodeURIComponent('XAU/USD');
+  const url=`https://api.twelvedata.com/time_series?symbol=${sym}&interval=${intv}&outputsize=${limit}&apikey=${API_KEY}`;
+  const r=await fetch(url);
+  const j=await r.json();
+  if(j.status==='error') throw new Error(j.message);
+  return j.values;
+}
+
+function notify(msg){
+  if(Notification.permission==='granted'){
+    new Notification('XAUUSD OrderBlock',{body:msg});
+    const snd=new Audio('https://actions.google.com/sounds/v1/alarms/beep_short.ogg');
+    snd.play().catch(()=>{});
+  }
+}
+
+async function tick(){
+  try{
+    const data=await fetchData(interval.value, backtest.checked?500:200);
+    const candles=tdToCandles(data);
+    makeChart(); series.setData(candles);
+    const obs=detectOB(candles.slice(-150), parseFloat(threshold.value)||1.2);
+    drawOB(obs);
+    const last=candles[candles.length-1].close;
+    obs.forEach(o=>{
+      if(last<=o.top && last>=o.bottom){
+        notify(`${o.type.toUpperCase()} zone hit ${o.bottom.toFixed(2)}-${o.top.toFixed(2)}`);
+      }
+    });
+  }catch(e){
+    const d=document.createElement('div');
+    d.className='ob-item';
+    d.innerHTML=`<small style="color:red">${new Date().toLocaleTimeString()} ERROR: ${e.message}</small>`;
+    oblist.prepend(d);
+  }
+}
+
+startBtn.onclick=()=>{
+  Notification.requestPermission();
+  makeChart();
+  startBtn.disabled=true; stopBtn.disabled=false;
+  tick(); timer=setInterval(tick,(parseInt(poll.value)||5)*1000);
+};
+
+stopBtn.onclick=()=>{
+  startBtn.disabled=false; stopBtn.disabled=true;
+  if(timer){clearInterval(timer);timer=null;}
+  clearLines(); oblist.innerHTML='<div>Stopped.</div>';
+};
+})();
+</script>
+</body>
+</html>
